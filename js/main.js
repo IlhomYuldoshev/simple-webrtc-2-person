@@ -22,7 +22,7 @@ const _ = {
         DECLINE_CALL: "call:decline",
         NEGOTIATION_NEEDED: "peer:nego:needed",
         NEGOTIATION_DONE: "peer:nego:done",
-        ICE_CANDIDATE: "send-ice-candidate",
+        ICE_CANDIDATE: "peer:send-ice-candidate",
     },
     RECEIVE: {
         SOMEONE_JOINED: "user:joined",
@@ -32,7 +32,7 @@ const _ = {
         CALL_DECLINED: "call:declined",
         PARTNER_NEEDS_NEGOTIATION: "peer:nego:needed",
         PARTNER_ACCEPTED_NEGOTIATION: "peer:nego:final",
-        ICE_CANDIDATE: "receive-ice-candidate",
+        ICE_CANDIDATE: "peer:receive-ice-candidate",
     },
 };
 
@@ -90,13 +90,13 @@ signalingSocket.on(_.RECEIVE.ICE_CANDIDATE, async (data) => {
         console.error("no peerconnection");
         return;
     }
-    if (!data.candidate) {
+    if (!data.candidateData.candidate) {
         await pc.addIceCandidate(null);
     } else {
-        await pc.addIceCandidate(data);
+        await pc.addIceCandidate(data.candidateData);
     }
 });
-signalingSocket.on(_.RECEIVE.PARTNER_CALLING, (data) => {
+signalingSocket.on(_.RECEIVE.PARTNER_CALLING, async (data) => {
     LOGGER("_.RECEIVE.PARTNER_CALLING", data);
     REMOTE_OFFER_SDP = data.offer;
     i_want_to_accept_call();
@@ -205,8 +205,16 @@ function createPeerConnection() {
             data.sdpMid = e.candidate.sdpMid;
             data.sdpMLineIndex = e.candidate.sdpMLineIndex;
         }
-        LOGGER("_.SEND.ICE_CANDIDATE", data);
-        signalingSocket.emit(_.SEND.ICE_CANDIDATE, data);
+        LOGGER("_.SEND.ICE_CANDIDATE", {
+            to: REMOTE_SOCKET_ID,
+            candidateData: data,
+            room: ROOM_ID,
+        });
+        signalingSocket.emit(_.SEND.ICE_CANDIDATE, {
+            to: REMOTE_SOCKET_ID,
+            candidateData: data,
+            room: ROOM_ID,
+        });
     };
     pc.ontrack = (e) => {
         LOGGER("getting remote stream tracks", e);
