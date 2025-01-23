@@ -7,58 +7,107 @@
  */
 
 "use strict";
-// import { io } from "socket.io-client";
+localStorage.debug = "*";
 
-// const signalingSocket = io("https://yunus-dev.uz/", {
-//     transports: ["websocket"],
-// });
+const LOGGER = function logger() {
+    console.log(...arguments);
+};
+
+const _ = {
+    SEND: {
+        JOIN: "room:join",
+        I_WANT_TO_HANDSHAKE: "user:hand:shake",
+        MAKE_CALL: "user:call",
+        ACCEPT_CALL: "call:accept",
+        DECLINE_CALL: "call:decline",
+        NEGOTIATION_NEEDED: "peer:nego:needed",
+        NEGOTIATION_DONE: "peer:nego:done",
+        ICE_CANDIDATE: "send-ice-candidate",
+    },
+    RECEIVE: {
+        SOMEONE_JOINED: "user:joined",
+        PARTNER_HAND_SHAKED: "user:hand:shaked",
+        PARTNER_CALLING: "call:incoming",
+        CALL_ACCEPTED: "call:accepted",
+        CALL_DECLINED: "call:declined",
+        PARTNER_NEEDS_NEGOTIATION: "peer:nego:needed",
+        PARTNER_ACCEPTED_NEGOTIATION: "peer:nego:final",
+        ICE_CANDIDATE: "receive-ice-candidate",
+    },
+};
+
+const ROOM_ID = "38";
+const MY_NAME = String(Math.random()).slice(2, 10);
+
+const signalingSocket = io("https://yunus-dev.uz/", {
+    transports: ["websocket"],
+});
 
 const startButton = document.getElementById("startButton");
 const hangupButton = document.getElementById("hangupButton");
+const showLocalButton = document.getElementById("see_local_constants");
 hangupButton.disabled = true;
 
 const localVideo = document.getElementById("localVideo");
 const remoteVideo = document.getElementById("remoteVideo");
 
+let REMOTE_SOCKET_ID;
+let REMOTE_OFFER_SDP;
 let pc;
 let localStream;
 
-const signaling = new BroadcastChannel("webrtc");
-signaling.onmessage = (e) => {
-    if (!localStream) {
-        console.log("not ready yet");
+// ------------ INITIALIZE ------------
+tryToGetLocalStream_InAdvance();
+
+LOGGER("_.SEND.JOIN", { email: MY_NAME, room: ROOM_ID });
+signalingSocket.emit(_.SEND.JOIN, {
+    email: MY_NAME,
+    room: ROOM_ID,
+});
+
+// ------------ EVENTS ------------
+signalingSocket.on(_.RECEIVE.SOMEONE_JOINED, (data) => {
+    LOGGER("_.RECEIVE.SOMEONE_JOINED", data);
+    if (data.email !== MY_NAME) {
+        REMOTE_SOCKET_ID = data.id;
+
+        LOGGER("_.SEND.I_WANT_TO_HANDSHAKE", { to: data.id, room: ROOM_ID });
+        signalingSocket.emit(_.SEND.I_WANT_TO_HANDSHAKE, {
+            to: data.id,
+            room: ROOM_ID,
+        });
+    }
+});
+signalingSocket.on(_.RECEIVE.PARTNER_HAND_SHAKED, (data) => {
+    LOGGER("_.RECEIVE.PARTNER_HAND_SHAKED", data);
+    if (ROOM_ID === data.room) {
+        REMOTE_SOCKET_ID = data.from;
+    }
+});
+signalingSocket.on(_.RECEIVE.ICE_CANDIDATE, async (data) => {
+    LOGGER("_.RECEIVE.ICE_CANDIDATE", data);
+    if (!pc) {
+        console.error("no peerconnection");
         return;
     }
-    switch (e.data.type) {
-        case "offer":
-            handleOffer(e.data);
-            break;
-        case "answer":
-            handleAnswer(e.data);
-            break;
-        case "candidate":
-            handleCandidate(e.data);
-            break;
-        case "ready":
-            // A second tab joined. This tab will initiate a call unless in a call already.
-            if (pc) {
-                console.log("already in call, ignoring");
-                return;
-            }
-            makeCall();
-            break;
-        case "bye":
-            if (pc) {
-                hangup();
-            }
-            break;
-        default:
-            console.log("unhandled", e);
-            break;
+    if (!data.candidate) {
+        await pc.addIceCandidate(null);
+    } else {
+        await pc.addIceCandidate(data);
     }
-};
+});
+signalingSocket.on(_.RECEIVE.PARTNER_CALLING, (data) => {
+    LOGGER("_.RECEIVE.PARTNER_CALLING", data);
+    REMOTE_OFFER_SDP = data.offer;
+    i_want_to_accept_call();
+});
+signalingSocket.on(_.RECEIVE.CALL_ACCEPTED, (data) => {
+    LOGGER("_.RECEIVE.CALL_ACCEPTED", data);
+    my_call_accepted_from_partner(data.answer);
+});
+// ------------------------------------------------------
 
-startButton.onclick = async () => {
+const i_want_to_start_call = async () => {
     localStream = await navigator.mediaDevices.getUserMedia({
         audio: true,
         video: true,
@@ -68,12 +117,65 @@ startButton.onclick = async () => {
     startButton.disabled = true;
     hangupButton.disabled = false;
 
-    signaling.postMessage({ type: "ready" });
+    if (pc) {
+        console.log("already in call, ignoring");
+        return;
+    }
+
+    await createPeerConnection();
+
+    const offer = await pc.createOffer();
+    LOGGER("_.SEND.MAKE_CALL", {
+        to: REMOTE_SOCKET_ID,
+        offer: offer,
+        room: ROOM_ID,
+    });
+    signalingSocket.emit(_.SEND.MAKE_CALL, {
+        to: REMOTE_SOCKET_ID,
+        offer: offer,
+        room: ROOM_ID,
+    });
+    await pc.setLocalDescription(offer);
+};
+
+const i_want_to_accept_call = async () => {
+    if (pc) {
+        console.error("existing peerconnection");
+        return;
+    }
+    await createPeerConnection();
+    await pc.setRemoteDescription(REMOTE_OFFER_SDP);
+
+    const answer = await pc.createAnswer();
+
+    LOGGER("_.SEND.ACCEPT_CALL", {
+        to: REMOTE_SOCKET_ID,
+        answer: answer,
+        room: ROOM_ID,
+    });
+    signalingSocket.emit(_.SEND.ACCEPT_CALL, {
+        to: REMOTE_SOCKET_ID,
+        answer: answer,
+        room: ROOM_ID,
+    });
+    await pc.setLocalDescription(answer);
+};
+
+const my_call_accepted_from_partner = async (answer) => {
+    if (!pc) {
+        console.error("no peerconnection");
+        return;
+    }
+    await pc.setRemoteDescription(answer);
+};
+
+startButton.onclick = async () => {
+    i_want_to_start_call();
 };
 
 hangupButton.onclick = async () => {
     hangup();
-    signaling.postMessage({ type: "bye" });
+    signalingSocket.emit("message", { type: "bye" });
 };
 
 async function hangup() {
@@ -95,58 +197,45 @@ function createPeerConnection() {
         ],
     });
     pc.onicecandidate = (e) => {
-        const message = {
-            type: "candidate",
+        const data = {
             candidate: null,
         };
         if (e.candidate) {
-            message.candidate = e.candidate.candidate;
-            message.sdpMid = e.candidate.sdpMid;
-            message.sdpMLineIndex = e.candidate.sdpMLineIndex;
+            data.candidate = e.candidate.candidate;
+            data.sdpMid = e.candidate.sdpMid;
+            data.sdpMLineIndex = e.candidate.sdpMLineIndex;
         }
-        signaling.postMessage(message);
+        LOGGER("_.SEND.ICE_CANDIDATE", data);
+        signalingSocket.emit(_.SEND.ICE_CANDIDATE, data);
     };
-    pc.ontrack = (e) => (remoteVideo.srcObject = e.streams[0]);
-    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+    pc.ontrack = (e) => {
+        LOGGER("getting remote stream tracks", e);
+        remoteVideo.srcObject = e.streams[0];
+    };
+    localStream.getTracks().forEach((track) => {
+        LOGGER("adding track to my stream");
+        pc.addTrack(track, localStream);
+    });
 }
 
-async function makeCall() {
-    await createPeerConnection();
+async function makeCall() {}
 
-    const offer = await pc.createOffer();
-    signaling.postMessage({ type: "offer", sdp: offer.sdp });
-    await pc.setLocalDescription(offer);
+async function tryToGetLocalStream_InAdvance() {
+    localStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: true,
+    });
+    localVideo.srcObject = localStream;
 }
 
-async function handleOffer(offer) {
-    if (pc) {
-        console.error("existing peerconnection");
-        return;
-    }
-    await createPeerConnection();
-    await pc.setRemoteDescription(offer);
-
-    const answer = await pc.createAnswer();
-    signaling.postMessage({ type: "answer", sdp: answer.sdp });
-    await pc.setLocalDescription(answer);
-}
-
-async function handleAnswer(answer) {
-    if (!pc) {
-        console.error("no peerconnection");
-        return;
-    }
-    await pc.setRemoteDescription(answer);
-}
-
-async function handleCandidate(candidate) {
-    if (!pc) {
-        console.error("no peerconnection");
-        return;
-    }
-    if (!candidate.candidate) {
-        await pc.addIceCandidate(null);
-    } else {
-        await pc.addIceCandidate(candidate);
-    }
-}
+showLocalButton.onclick = () => {
+    LOGGER("LOCAL_CONSTANTS", {
+        pc: pc,
+        localStream,
+        remoteVideo,
+        REMOTE_SOCKET_ID,
+        REMOTE_OFFER_SDP,
+        ROOM_ID,
+        MY_NAME,
+    });
+};
